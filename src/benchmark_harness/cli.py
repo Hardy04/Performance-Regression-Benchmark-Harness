@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
+from benchmark_harness.reporter import to_json, to_markdown
 from benchmark_harness.runner import BenchmarkResult, Sample, run_benchmark
 from benchmark_harness.stats import ComparisonResult, Verdict, compare_all
 
@@ -139,9 +140,14 @@ def _comparison_table(results: list[ComparisonResult], before_label: str, after_
               help="Significance level (p-value threshold).")
 @click.option("--min-effect", default=0.2, show_default=True,
               help="Minimum |Cohen's d| to treat a change as meaningful.")
-@click.option("--metric", default="wall_s", show_default=True,
+@click.option("--metric", default="all", show_default=True,
               type=click.Choice(["wall_s", "cpu_s", "peak_rss_mb", "all"]),
               help="Metric to compare, or 'all' for all three.")
+@click.option("--output", "-f", "output_format", default="console", show_default=True,
+              type=click.Choice(["console", "json", "markdown"]),
+              help="Output format. Use 'markdown' for CI/PR comments.")
+@click.option("--report-out", default=None,
+              help="Write the report to this file instead of stdout (json/markdown only).")
 def compare_cmd(
     before_json: Path,
     after_json: Path,
@@ -149,12 +155,16 @@ def compare_cmd(
     alpha: float,
     min_effect: float,
     metric: str,
+    output_format: str,
+    report_out: str | None,
 ) -> None:
     """Compare BEFORE_JSON and AFTER_JSON and print a regression verdict.
 
     \b
-    Example:
-        bench compare before.json after.json --stat bootstrap --alpha 0.05
+    Examples:
+        bench compare before.json after.json
+        bench compare before.json after.json --stat bootstrap --output markdown
+        bench compare before.json after.json --output markdown --report-out report.md
     """
     before = BenchmarkResult.load(before_json)
     after = BenchmarkResult.load(after_json)
@@ -167,22 +177,41 @@ def compare_cmd(
         comparisons = [_compare(before, after, metric=metric,  # type: ignore[arg-type]
                                 stat_method=stat_method, alpha=alpha, min_effect=min_effect)]
 
-    console.print()
-    console.print(_comparison_table(comparisons, before.label, after.label))
-
-    # Footer: method settings
-    console.print(
-        f"\n  Method: [cyan]{stat_method}[/cyan]  "
-        f"α=[cyan]{alpha}[/cyan]  "
-        f"min |d|=[cyan]{min_effect}[/cyan]"
-    )
-
-    # Overall verdict: any regression wins
     verdicts = {r.verdict for r in comparisons}
-    if Verdict.REGRESSION in verdicts:
-        console.print("\n[bold red]✗ REGRESSION detected[/bold red]\n")
+    is_regression = Verdict.REGRESSION in verdicts
+
+    if output_format == "json":
+        text = to_json(comparisons, before, after)
+        if report_out:
+            Path(report_out).write_text(text, encoding="utf-8")
+            console.print(f"[green]✓[/green] JSON report written to [bold]{report_out}[/bold]")
+        else:
+            import sys
+            sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+
+    elif output_format == "markdown":
+        text = to_markdown(comparisons, before, after)
+        if report_out:
+            Path(report_out).write_text(text, encoding="utf-8")
+            console.print(f"[green]✓[/green] Markdown report written to [bold]{report_out}[/bold]")
+        else:
+            import sys
+            sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+
+    else:  # console (default)
+        console.print()
+        console.print(_comparison_table(comparisons, before.label, after.label))
+        console.print(
+            f"\n  Method: [cyan]{stat_method}[/cyan]  "
+            f"α=[cyan]{alpha}[/cyan]  "
+            f"min |d|=[cyan]{min_effect}[/cyan]"
+        )
+        if is_regression:
+            console.print("\n[bold red]✗ REGRESSION detected[/bold red]\n")
+        elif Verdict.IMPROVEMENT in verdicts:
+            console.print("\n[bold green]✓ IMPROVEMENT detected[/bold green]\n")
+        else:
+            console.print("\n[dim]— No significant change[/dim]\n")
+
+    if is_regression:
         raise SystemExit(1)
-    elif Verdict.IMPROVEMENT in verdicts:
-        console.print("\n[bold green]✓ IMPROVEMENT detected[/bold green]\n")
-    else:
-        console.print("\n[dim]— No significant change[/dim]\n")
