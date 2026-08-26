@@ -1,0 +1,164 @@
+name: Benchmark Regression Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Shell command to benchmark (e.g. 'python my_script.py')"
+        required: true
+        default: "python examples/slow_version.py"
+      runs:
+        description: "Number of timed measurement runs"
+        required: false
+        default: "20"
+      warmup:
+        description: "Number of warmup runs (not timed)"
+        required: false
+        default: "3"
+      stat_method:
+        description: "Statistical test: ttest or bootstrap"
+        required: false
+        default: "ttest"
+      alpha:
+        description: "Significance level (p-value threshold)"
+        required: false
+        default: "0.05"
+      min_effect:
+        description: "Minimum |Cohen's d| to treat a change as meaningful"
+        required: false
+        default: "0.2"
+
+# ---------------------------------------------------------------------------
+# HOW TO CONFIGURE YOUR BENCHMARK COMMAND
+#
+# Option A — workflow_dispatch inputs (one-off runs, shown above).
+#
+# Option B — create a .benchmark.env file in your repo root with:
+#
+#   BENCH_COMMAND=python my_script.py
+#   BENCH_RUNS=20
+#   BENCH_WARMUP=3
+#   BENCH_STAT=ttest
+#   BENCH_ALPHA=0.05
+#   BENCH_MIN_EFFECT=0.2
+#
+# The step below loads it automatically when present.
+# ---------------------------------------------------------------------------
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+
+    permissions:
+      pull-requests: write   # required to post/update PR comments
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install benchmark harness
+        run: pip install -e ".[dev]" --quiet
+
+      # ── Load config from .benchmark.env if present ──────────────────────
+      - name: Load benchmark config
+        id: config
+        run: |
+          # Defaults (can be overridden by .benchmark.env or workflow_dispatch inputs)
+          BENCH_COMMAND="${{ github.event.inputs.command || 'python examples/slow_version.py' }}"
+          BENCH_RUNS="${{ github.event.inputs.runs || '20' }}"
+          BENCH_WARMUP="${{ github.event.inputs.warmup || '3' }}"
+          BENCH_STAT="${{ github.event.inputs.stat_method || 'ttest' }}"
+          BENCH_ALPHA="${{ github.event.inputs.alpha || '0.05' }}"
+          BENCH_MIN_EFFECT="${{ github.event.inputs.min_effect || '0.2' }}"
+
+          if [ -f ".benchmark.env" ]; then
+            echo "Found .benchmark.env — loading overrides"
+            set -a; source .benchmark.env; set +a
+          fi
+
+          echo "command=${BENCH_COMMAND}"      >> "$GITHUB_OUTPUT"
+          echo "runs=${BENCH_RUNS}"            >> "$GITHUB_OUTPUT"
+          echo "warmup=${BENCH_WARMUP}"        >> "$GITHUB_OUTPUT"
+          echo "stat=${BENCH_STAT}"            >> "$GITHUB_OUTPUT"
+          echo "alpha=${BENCH_ALPHA}"          >> "$GITHUB_OUTPUT"
+          echo "min_effect=${BENCH_MIN_EFFECT}" >> "$GITHUB_OUTPUT"
+
+      # ── Benchmark the BASE branch ────────────────────────────────────────
+      - name: Benchmark base branch
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE_SHA" ]; then
+            # workflow_dispatch: compare HEAD~1 as base
+            BASE_SHA=$(git rev-parse HEAD~1)
+          fi
+          echo "Checking out base: $BASE_SHA"
+          git checkout "$BASE_SHA"
+          bench run "${{ steps.config.outputs.command }}" \
+            --label "base (${{ github.event.pull_request.base.ref || 'HEAD~1' }})" \
+            --runs   ${{ steps.config.outputs.runs }} \
+            --warmup ${{ steps.config.outputs.warmup }} \
+            --out before.json
+
+      # ── Benchmark the PR HEAD ────────────────────────────────────────────
+      - name: Benchmark PR branch
+        run: |
+          HEAD_SHA="${{ github.sha }}"
+          echo "Checking out head: $HEAD_SHA"
+          git checkout "$HEAD_SHA"
+          bench run "${{ steps.config.outputs.command }}" \
+            --label "pr (${{ github.head_ref || github.ref_name }})" \
+            --runs   ${{ steps.config.outputs.runs }} \
+            --warmup ${{ steps.config.outputs.warmup }} \
+            --out after.json
+
+      # ── Compare and generate Markdown report ─────────────────────────────
+      - name: Compare results
+        id: compare
+        run: |
+          set +e   # don't exit on regression (exit code 1 is expected)
+          bench compare before.json after.json \
+            --stat        ${{ steps.config.outputs.stat }} \
+            --alpha       ${{ steps.config.outputs.alpha }} \
+            --min-effect  ${{ steps.config.outputs.min_effect }} \
+            --output      markdown \
+            --report-out  report.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # ── Upload result artifacts ───────────────────────────────────────────
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            before.json
+            after.json
+            report.md
+          retention-days: 14
+
+      # ── Post or update PR comment ─────────────────────────────────────────
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bench comment report.md
+
+      # ── Fail the job if a regression was detected ─────────────────────────
+      - name: Fail on regression
+        if: steps.compare.outputs.exit_code != '0'
+        run: |
+          echo "::error::Performance regression detected. See the benchmark report in the PR comment."
+          exit 1

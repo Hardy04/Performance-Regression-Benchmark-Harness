@@ -17,6 +17,9 @@ dependencies = [
     "scipy>=1.11",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 bench = "benchmark_harness.cli:cli"
 

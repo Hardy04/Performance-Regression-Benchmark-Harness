@@ -215,3 +215,29 @@ def compare_cmd(
 
     if is_regression:
         raise SystemExit(1)
+
+
+@cli.command("comment")
+@click.argument("report_md", type=click.Path(exists=True, path_type=Path))
+@click.option("--repo", required=True, envvar="GITHUB_REPOSITORY",
+              help="GitHub repo in owner/name format (auto-set in Actions via GITHUB_REPOSITORY).")
+@click.option("--pr", "pr_number", required=True, type=int, envvar="PR_NUMBER",
+              help="Pull request number.")
+@click.option("--token", default=None, envvar="GITHUB_TOKEN",
+              help="GitHub token (default: GITHUB_TOKEN env var).")
+def comment_cmd(report_md: Path, repo: str, pr_number: int, token: str | None) -> None:
+    """Post or update a PR comment with the Markdown report.
+
+    \b
+    Example (in CI):
+        bench comment report.md --repo owner/repo --pr 42
+    """
+    from benchmark_harness.gh_comment import post_or_update_comment
+
+    console.print(f"\nPosting report to [bold]{repo}[/bold] PR [cyan]#{pr_number}[/cyan]…")
+    try:
+        url = post_or_update_comment(report_md, repo=repo, pr_number=pr_number, token=token)
+        console.print(f"[green]✓[/green] Comment posted: {url}\n")
+    except Exception as exc:
+        console.print(f"[red]✗ Failed to post comment:[/red] {exc}\n")
+        raise SystemExit(1)
