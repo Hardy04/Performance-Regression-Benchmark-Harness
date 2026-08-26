@@ -7,6 +7,7 @@ build/
 venv/
 *.json
 !examples/*.json
+.benchmark.env
 .pytest_cache/
 .ruff_cache/
 *.png
