@@ -312,3 +312,57 @@ def optimize_cmd(
         console.print(f"\n[bold red]✗ No verified improvement after {len(report.attempts)} attempt(s)"
                       f" — {target} left unchanged[/bold red]\n")
         raise SystemExit(1)
+
+
+@cli.command("eval")
+@click.argument("tasks_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--proposer", "proposer_kind", default="anthropic", show_default=True,
+              type=click.Choice(["anthropic", "scripted"]),
+              help="'scripted' replays each task's candidates/ folder (deterministic, offline).")
+@click.option("--model", default=None, help="Claude model id for --proposer anthropic.")
+@click.option("--max-iterations", default=5, show_default=True, help="Attempts allowed per task.")
+@click.option("--runs", "-n", default=10, show_default=True, help="Timed runs per measurement.")
+@click.option("--report-out", default=None, help="Write the eval summary as JSON to this path.")
+def eval_cmd(tasks_dir: Path, proposer_kind: str, model: str | None,
+             max_iterations: int, runs: int, report_out: str | None) -> None:
+    """Score the optimisation agent across every task in TASKS_DIR.
+
+    Reports solve rate and mean attempts-to-solve, so changes to the agent (prompt, model,
+    verification rules) can be compared with numbers rather than anecdotes.
+
+    \b
+    Example:
+        bench eval examples/tasks --proposer scripted
+    """
+    import json
+
+    from benchmark_harness.agent import DEFAULT_MODEL, AnthropicProposer
+    from benchmark_harness.evals import run_eval, scripted_for
+
+    if proposer_kind == "scripted":
+        factory = scripted_for
+    else:
+        try:
+            shared = AnthropicProposer(model=model or DEFAULT_MODEL)
+        except Exception as exc:
+            raise click.ClickException(str(exc))
+        factory = lambda _task_dir: shared  # noqa: E731 - stateless, safe to share
+
+    console.print(f"\n[bold cyan]Evaluating agent on[/bold cyan] {tasks_dir}\n")
+    summary = run_eval(tasks_dir, factory, runs=runs, max_iterations=max_iterations,
+                       on_event=lambda m: console.print(f"  {m}"))
+
+    table = Table(title="[bold]Agent eval[/bold]", show_header=True)
+    table.add_column("Task", style="cyan")
+    table.add_column("Solved", justify="center")
+    table.add_column("Attempts", justify="right")
+    table.add_column("Wall Δ%", justify="right")
+    for r in summary.results:
+        table.add_row(r.task, "[green]yes[/green]" if r.solved else "[red]no[/red]", str(r.attempts),
+                      f"{r.wall_delta_pct:+.1f}%" if r.wall_delta_pct is not None else "—")
+    console.print(table)
+    mean = summary.mean_attempts_to_solve
+    console.print(f"\n  Solve rate: [bold]{summary.solve_rate:.0%}[/bold]   "
+                  f"Mean attempts to solve: [bold]{'—' if mean is None else f'{mean:.1f}'}[/bold]\n")
+    if report_out:
+        Path(report_out).write_text(json.dumps(summary.to_dict(), indent=2), encoding="utf-8")

@@ -235,6 +235,24 @@ Design notes:
 - **Pluggable proposer.** `Proposer` is a one-method protocol; tests use a scripted proposer, so the loop is verified without network access.
 - **Caveats.** It executes model-written code (use a scratch copy). Timing is noisy on busy machines — a noisy baseline can cause false rejections, so raise `--runs` if you see them.
 
+### Evaluating the agent — `bench eval`
+
+Agents should be measured, not eyeballed. `bench eval` runs the optimiser over every task in a folder (each task = `slow.py` + optional `candidates/`) in a scratch copy and reports **solve rate** and **mean attempts to solve**:
+
+```bash
+bench eval examples/tasks --proposer scripted   # deterministic, offline (CI-safe)
+bench eval examples/tasks --proposer anthropic  # real model; compare models/prompts by these two numbers
+```
+
+```
+│ duplicates  │  yes   │        2 │  -69.3% │
+│ fibonacci   │  yes   │        2 │  -50.6% │
+│ sum_squares │  yes   │        2 │  -47.8% │
+Solve rate: 100%   Mean attempts to solve: 2.0
+```
+
+The scripted run validates the *harness* (every task's wrong candidate must be rejected, the real fix accepted); the Anthropic run measures the *agent*. Add a task by creating `examples/tasks/<name>/slow.py`.
+
 ---
 
 ## Running tests
@@ -244,7 +262,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-42 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
+45 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
 
 ---
 
