@@ -241,3 +241,74 @@ def comment_cmd(report_md: Path, repo: str, pr_number: int, token: str | None) -
     except Exception as exc:
         console.print(f"[red]✗ Failed to post comment:[/red] {exc}\n")
         raise SystemExit(1)
+
+
+@cli.command("optimize")
+@click.argument("target", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--command", "-c", required=True,
+              help="Shell command that executes TARGET, e.g. 'python work.py'.")
+@click.option("--proposer", "proposer_kind", default="anthropic", show_default=True,
+              type=click.Choice(["anthropic", "scripted"]),
+              help="Who proposes fixes. 'scripted' replays files from --candidates (offline demo).")
+@click.option("--candidates", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="Directory of candidate .py files for --proposer scripted.")
+@click.option("--model", default=None, help="Claude model id for --proposer anthropic.")
+@click.option("--max-iterations", default=5, show_default=True, help="Maximum propose/verify cycles.")
+@click.option("--runs", "-n", default=10, show_default=True, help="Timed runs per measurement.")
+@click.option("--warmup", "-w", default=2, show_default=True, help="Warmup runs per measurement.")
+@click.option("--alpha", default=0.05, show_default=True, help="Significance level.")
+@click.option("--min-effect", default=0.2, show_default=True, help="Minimum |Cohen's d|.")
+@click.option("--report-out", default=None, help="Write the attempt log as JSON to this path.")
+def optimize_cmd(
+    target: Path,
+    command: str,
+    proposer_kind: str,
+    candidates: Path | None,
+    model: str | None,
+    max_iterations: int,
+    runs: int,
+    warmup: int,
+    alpha: float,
+    min_effect: float,
+    report_out: str | None,
+) -> None:
+    """Let an agent propose a fix for TARGET; the harness verifies it and retries if needed.
+
+    The agent's file edit is accepted only if stdout is unchanged AND the statistics engine reports
+    a significant wall-time improvement with no regressions. Otherwise it is reverted and the agent
+    retries with the measured numbers. NOTE: this executes model-written code — use a scratch copy.
+
+    \b
+    Example:
+        bench optimize work.py -c "python work.py" --max-iterations 5
+    """
+    import json
+
+    from benchmark_harness.agent import DEFAULT_MODEL, AnthropicProposer, ScriptedProposer, optimize
+
+    if proposer_kind == "scripted":
+        if candidates is None:
+            raise click.UsageError("--proposer scripted requires --candidates DIR")
+        proposer = ScriptedProposer.from_directory(candidates)
+    else:
+        try:
+            proposer = AnthropicProposer(model=model or DEFAULT_MODEL)
+        except Exception as exc:
+            raise click.ClickException(str(exc))
+
+    console.print(f"\n[bold cyan]Optimising:[/bold cyan] {target}  ([dim]{command}[/dim])\n")
+    report = optimize(
+        target, command, proposer, runs=runs, warmup=warmup, max_iterations=max_iterations,
+        alpha=alpha, min_effect=min_effect, on_event=lambda m: console.print(f"  {m}"),
+    )
+
+    if report_out:
+        Path(report_out).write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    if report.accepted:
+        console.print(_comparison_table(report.final_comparisons, "baseline", "candidate"))
+        console.print(f"\n[bold green]✓ Verified improvement after {len(report.attempts)} attempt(s)"
+                      f" — {target} updated[/bold green]\n")
+    else:
+        console.print(f"\n[bold red]✗ No verified improvement after {len(report.attempts)} attempt(s)"
+                      f" — {target} left unchanged[/bold red]\n")
+        raise SystemExit(1)

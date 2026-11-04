@@ -202,6 +202,41 @@ The workflow uses `GITHUB_TOKEN` (built into every Actions run — no setup need
 
 ---
 
+## Agentic mode — `bench optimize`
+
+An agent loop where **the harness is the objective judge**: an LLM proposes a fix, the harness verifies it, and the agent retries with the measured numbers if they don't improve.
+
+```
+        ┌────────────┐  new file   ┌──────────────────────────────┐
+        │  Proposer  │────────────▶│ 1. stdout identical?         │──no──┐
+        │ (Claude)   │             │ 2. bench: significant        │──no──┤
+        └─────▲──────┘             │    wall-time IMPROVEMENT,    │      │
+              │                    │    no regression elsewhere?  │      │
+              │ rejected attempts  └──────────────┬───────────────┘      │
+              │ + p-value, Δ%, d                  │ yes                  │
+              └───────────────────────────────────┼──────────────────────┘
+                                                  ▼    revert file + retry
+                                   keep the change, stop (≤ max-iterations)
+```
+
+```bash
+# Real agent (needs `pip install -e ".[agent]"` and ANTHROPIC_API_KEY)
+cp examples/slow_version.py work.py
+bench optimize work.py -c "python work.py" --max-iterations 5
+
+# Offline demo, no API key: replays examples/candidates/ (wrong output → no gain → real fix)
+bench optimize work.py -c "python work.py" --proposer scripted --candidates examples/candidates
+```
+
+Design notes:
+- **Two gates, both objective.** Correctness (identical stdout) comes before speed, so "fast but wrong" is never accepted. Speed uses the same Welch/bootstrap + Cohen's d rule as `bench compare`.
+- **Feedback, not just retry.** Each retry prompt includes every rejected attempt with its Δ%, p-value and effect size.
+- **Always reversible.** Rejected candidates, crashes and Ctrl-C all restore the original file.
+- **Pluggable proposer.** `Proposer` is a one-method protocol; tests use a scripted proposer, so the loop is verified without network access.
+- **Caveats.** It executes model-written code (use a scratch copy). Timing is noisy on busy machines — a noisy baseline can cause false rejections, so raise `--runs` if you see them.
+
+---
+
 ## Running tests
 
 ```bash
@@ -209,7 +244,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-36 tests covering the runner, statistics engine, reporter, and GitHub commenter (HTTP calls mocked).
+42 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
 
 ---
 
