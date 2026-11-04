@@ -224,6 +224,11 @@ An agent loop where **the harness is the objective judge**: an LLM proposes a fi
 cp examples/slow_version.py work.py
 bench optimize work.py -c "python work.py" --max-iterations 5
 
+# Free real agent: a local model via Ollama (no key, no cost, nothing leaves your machine)
+#   1. install from https://ollama.com   2. ollama pull qwen2.5-coder:7b
+bench optimize work.py -c "python work.py" --proposer ollama
+bench eval examples/tasks --proposer ollama --model qwen2.5-coder:7b   # set OLLAMA_HOST for a remote server
+
 # Offline demo, no API key: replays examples/candidates/ (wrong output → no gain → real fix)
 bench optimize work.py -c "python work.py" --proposer scripted --candidates examples/candidates
 ```
@@ -232,7 +237,7 @@ Design notes:
 - **Two gates, both objective.** Correctness (identical stdout) comes before speed, so "fast but wrong" is never accepted. Speed uses the same Welch/bootstrap + Cohen's d rule as `bench compare`.
 - **Feedback, not just retry.** Each retry prompt includes every rejected attempt with its Δ%, p-value and effect size.
 - **Always reversible.** Rejected candidates, crashes and Ctrl-C all restore the original file.
-- **Pluggable proposer.** `Proposer` is a one-method protocol; tests use a scripted proposer, so the loop is verified without network access.
+- **Pluggable proposer.** `Proposer` is a one-method protocol with three implementations: Claude (paid API), Ollama (free, local) and scripted (offline, deterministic). The loop is verified without network access, and swapping models is a flag, so models can be compared with `bench eval`.
 - **Caveats.** It executes model-written code (use a scratch copy). Timing is noisy on busy machines — a noisy baseline can cause false rejections, so raise `--runs` if you see them.
 
 ### Evaluating the agent — `bench eval`
@@ -262,7 +267,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-47 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
+51 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), the CLI, and the agent loop (scripted and mocked-Ollama proposers).
 
 ---
 

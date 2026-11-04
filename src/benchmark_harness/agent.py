@@ -12,6 +12,7 @@ from every failed attempt, up to ``max_iterations``.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -24,6 +25,7 @@ from benchmark_harness.runner import BenchmarkResult, run_benchmark
 from benchmark_harness.stats import ComparisonResult, Verdict, compare_all
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
 
 
 # --------------------------------------------------------------------------- data types
@@ -119,8 +121,16 @@ def extract_proposal(text: str) -> Proposal | None:
     return Proposal(source=match.group(1), rationale=text[: match.start()].strip())
 
 
+def build_user_prompt(source: str, command: str, history: list[Attempt]) -> str:
+    """The user turn shared by every LLM-backed proposer."""
+    parts = [f"Benchmark command:\n{command}\n", f"Current file:\n```python\n{source}\n```"]
+    if history:
+        parts.append("Rejected attempts so far:\n" + "\n".join(a.summary() for a in history))
+    return "\n\n".join(parts)
+
+
 class AnthropicProposer:
-    """Asks a Claude model for a faster version of the target file."""
+    """Asks a Claude model for a faster version of the target file (paid API, needs ANTHROPIC_API_KEY)."""
 
     def __init__(self, model: str = DEFAULT_MODEL, max_tokens: int = 4096) -> None:
         try:
@@ -132,17 +142,68 @@ class AnthropicProposer:
         self._max_tokens = max_tokens
 
     def propose(self, source: str, command: str, history: list[Attempt]) -> Proposal | None:
-        parts = [f"Benchmark command:\n{command}\n", f"Current file:\n```python\n{source}\n```"]
-        if history:
-            parts.append("Rejected attempts so far:\n" + "\n".join(a.summary() for a in history))
         response = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": "\n\n".join(parts)}],
+            messages=[{"role": "user", "content": build_user_prompt(source, command, history)}],
         )
         text = "".join(block.text for block in response.content if block.type == "text")
         return extract_proposal(text)
+
+
+class OllamaProposer:
+    """Asks a local Ollama model for a faster version of the target file. Free: no key, no network.
+
+    Requires Ollama running locally (https://ollama.com) and the model pulled, e.g.
+    ``ollama pull qwen2.5-coder:7b``. The server address comes from ``OLLAMA_HOST``
+    (default ``http://localhost:11434``).
+    """
+
+    def __init__(self, model: str = DEFAULT_OLLAMA_MODEL, host: str | None = None,
+                 timeout_s: float = 300.0) -> None:
+        host = host or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
+        if "://" not in host:
+            host = f"http://{host}"
+        self._url = host.rstrip("/") + "/api/chat"
+        self._model = model
+        self._timeout_s = timeout_s
+
+    def propose(self, source: str, command: str, history: list[Attempt]) -> Proposal | None:
+        import requests
+
+        payload = {
+            "model": self._model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_prompt(source, command, history)},
+            ],
+        }
+        try:
+            resp = requests.post(self._url, json=payload, timeout=self._timeout_s)
+            resp.raise_for_status()
+        except requests.ConnectionError as exc:
+            raise RuntimeError(
+                f"Cannot reach Ollama at {self._url}. Install it from https://ollama.com, "
+                "start it, and run: ollama pull " + self._model
+            ) from exc
+        except requests.HTTPError as exc:
+            raise RuntimeError(f"Ollama returned an error ({exc}). Is the model '{self._model}' pulled?") from exc
+        return extract_proposal(resp.json().get("message", {}).get("content", ""))
+
+
+def make_proposer(kind: str, model: str | None = None, candidates: Path | None = None) -> Proposer:
+    """Build a proposer by name: 'anthropic', 'ollama' or 'scripted'."""
+    if kind == "scripted":
+        if candidates is None:
+            raise ValueError("--proposer scripted requires --candidates DIR")
+        return ScriptedProposer.from_directory(candidates)
+    if kind == "ollama":
+        return OllamaProposer(model=model or DEFAULT_OLLAMA_MODEL)
+    if kind == "anthropic":
+        return AnthropicProposer(model=model or DEFAULT_MODEL)
+    raise ValueError(f"Unknown proposer: {kind}")
 
 
 # --------------------------------------------------------------------------- verification

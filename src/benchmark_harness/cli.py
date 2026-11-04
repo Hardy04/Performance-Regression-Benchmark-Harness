@@ -248,11 +248,11 @@ def comment_cmd(report_md: Path, repo: str, pr_number: int, token: str | None) -
 @click.option("--command", "-c", required=True,
               help="Shell command that executes TARGET, e.g. 'python work.py'.")
 @click.option("--proposer", "proposer_kind", default="anthropic", show_default=True,
-              type=click.Choice(["anthropic", "scripted"]),
-              help="Who proposes fixes. 'scripted' replays files from --candidates (offline demo).")
+              type=click.Choice(["anthropic", "ollama", "scripted"]),
+              help="Who proposes fixes. 'ollama' = free local model. 'scripted' replays files from --candidates (offline demo).")
 @click.option("--candidates", type=click.Path(exists=True, file_okay=False, path_type=Path),
               default=None, help="Directory of candidate .py files for --proposer scripted.")
-@click.option("--model", default=None, help="Claude model id for --proposer anthropic.")
+@click.option("--model", default=None, help="Model for anthropic (default claude-sonnet-5-5) or ollama (default qwen2.5-coder:7b).")
 @click.option("--max-iterations", default=5, show_default=True, help="Maximum propose/verify cycles.")
 @click.option("--runs", "-n", default=10, show_default=True, help="Timed runs per measurement.")
 @click.option("--warmup", "-w", default=2, show_default=True, help="Warmup runs per measurement.")
@@ -284,23 +284,21 @@ def optimize_cmd(
     """
     import json
 
-    from benchmark_harness.agent import DEFAULT_MODEL, AnthropicProposer, ScriptedProposer, optimize
+    from benchmark_harness.agent import make_proposer, optimize
 
-    if proposer_kind == "scripted":
-        if candidates is None:
-            raise click.UsageError("--proposer scripted requires --candidates DIR")
-        proposer = ScriptedProposer.from_directory(candidates)
-    else:
-        try:
-            proposer = AnthropicProposer(model=model or DEFAULT_MODEL)
-        except Exception as exc:
-            raise click.ClickException(str(exc))
+    try:
+        proposer = make_proposer(proposer_kind, model, candidates)
+    except Exception as exc:
+        raise click.ClickException(str(exc))
 
     console.print(f"\n[bold cyan]Optimising:[/bold cyan] {target}  ([dim]{command}[/dim])\n")
-    report = optimize(
-        target, command, proposer, runs=runs, warmup=warmup, max_iterations=max_iterations,
-        alpha=alpha, min_effect=min_effect, on_event=lambda m: console.print(f"  {m}"),
-    )
+    try:
+        report = optimize(
+            target, command, proposer, runs=runs, warmup=warmup, max_iterations=max_iterations,
+            alpha=alpha, min_effect=min_effect, on_event=lambda m: console.print(f"  {m}"),
+        )
+    except RuntimeError as exc:  # e.g. Ollama not running; the target file has been restored
+        raise click.ClickException(str(exc))
 
     if report_out:
         Path(report_out).write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
@@ -317,9 +315,9 @@ def optimize_cmd(
 @cli.command("eval")
 @click.argument("tasks_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--proposer", "proposer_kind", default="anthropic", show_default=True,
-              type=click.Choice(["anthropic", "scripted"]),
-              help="'scripted' replays each task's candidates/ folder (deterministic, offline).")
-@click.option("--model", default=None, help="Claude model id for --proposer anthropic.")
+              type=click.Choice(["anthropic", "ollama", "scripted"]),
+              help="'ollama' = free local model. 'scripted' replays each task's candidates/ folder (deterministic, offline).")
+@click.option("--model", default=None, help="Model for anthropic (default claude-sonnet-5-5) or ollama (default qwen2.5-coder:7b).")
 @click.option("--max-iterations", default=5, show_default=True, help="Attempts allowed per task.")
 @click.option("--runs", "-n", default=10, show_default=True, help="Timed runs per measurement.")
 @click.option("--report-out", default=None, help="Write the eval summary as JSON to this path.")
@@ -338,21 +336,24 @@ def eval_cmd(tasks_dir: Path, proposer_kind: str, model: str | None,
     """
     import json
 
-    from benchmark_harness.agent import DEFAULT_MODEL, AnthropicProposer
+    from benchmark_harness.agent import make_proposer
     from benchmark_harness.evals import run_eval, scripted_for
 
     if proposer_kind == "scripted":
         factory = scripted_for
     else:
         try:
-            shared = AnthropicProposer(model=model or DEFAULT_MODEL)
+            shared = make_proposer(proposer_kind, model)
         except Exception as exc:
             raise click.ClickException(str(exc))
         factory = lambda _task_dir: shared  # noqa: E731 - stateless, safe to share
 
     console.print(f"\n[bold cyan]Evaluating agent on[/bold cyan] {tasks_dir}\n")
-    summary = run_eval(tasks_dir, factory, runs=runs, max_iterations=max_iterations,
-                       on_event=lambda m: console.print(f"  {m}"))
+    try:
+        summary = run_eval(tasks_dir, factory, runs=runs, max_iterations=max_iterations,
+                           on_event=lambda m: console.print(f"  {m}"))
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
 
     table = Table(title="[bold]Agent eval[/bold]", show_header=True)
     table.add_column("Task", style="cyan")
