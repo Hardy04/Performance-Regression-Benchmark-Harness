@@ -262,7 +262,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-45 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
+47 tests covering the runner, statistics engine, reporter, GitHub commenter (HTTP calls mocked), and the agent loop (scripted proposer).
 
 ---
 

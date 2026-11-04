@@ -323,8 +323,10 @@ def optimize_cmd(
 @click.option("--max-iterations", default=5, show_default=True, help="Attempts allowed per task.")
 @click.option("--runs", "-n", default=10, show_default=True, help="Timed runs per measurement.")
 @click.option("--report-out", default=None, help="Write the eval summary as JSON to this path.")
+@click.option("--min-solve-rate", default=0.0, show_default=True, type=click.FloatRange(0.0, 1.0),
+              help="Exit with code 1 if the solve rate is below this (for CI gating).")
 def eval_cmd(tasks_dir: Path, proposer_kind: str, model: str | None,
-             max_iterations: int, runs: int, report_out: str | None) -> None:
+             max_iterations: int, runs: int, report_out: str | None, min_solve_rate: float) -> None:
     """Score the optimisation agent across every task in TASKS_DIR.
 
     Reports solve rate and mean attempts-to-solve, so changes to the agent (prompt, model,
@@ -366,3 +368,7 @@ def eval_cmd(tasks_dir: Path, proposer_kind: str, model: str | None,
                   f"Mean attempts to solve: [bold]{'—' if mean is None else f'{mean:.1f}'}[/bold]\n")
     if report_out:
         Path(report_out).write_text(json.dumps(summary.to_dict(), indent=2), encoding="utf-8")
+    if summary.solve_rate < min_solve_rate:
+        console.print(f"[bold red]✗ Solve rate {summary.solve_rate:.0%} is below the required "
+                      f"{min_solve_rate:.0%}[/bold red]\n")
+        raise SystemExit(1)
